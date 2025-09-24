@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chunkformer"
-version = "0.1.1"
+version = "1.0.0"
 authors = [
     {name = "khanld", email = "khanhld218@gmail.com"},
 ]
@@ -12,7 +12,7 @@ description = "ChunkFormer: Masked Chunking Conformer For Long-Form Speech Trans
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
