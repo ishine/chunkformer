@@ -14,7 +14,13 @@ This repository contains the implementation and supplementary materials for our 
 - [Introduction](#introduction)
 - [Key Features](#key-features)
 - [Installation](#installation)
+  - [Install from PyPI (Recommended)](#option-1-install-from-pypi-recommended)
+  - [Install from source](#option-2-install-from-source)
+  - [Pretrained Models](#pretrained-models)
 - [Usage](#usage)
+  - [Python API Usage](#python-api-usage)
+  - [Command Line Usage](#command-line-usage)
+- [Training the Model](#training)
 - [Citation](#citation)
 - [Acknowledgments](#acknowledgments)
 
@@ -36,32 +42,74 @@ ChunkFormer is an ASR model designed for processing long audio inputs effectivel
 
 <a name = "installation" ></a>
 ## Installation
-#### Checkpoints
+
+### Option 1: Install from PyPI (Recommended)
+```bash
+pip install chunkformer
+```
+
+### Option 2: Install from source
+```bash
+# Clone the repository
+git clone https://github.com/your-username/chunkformer.git
+cd chunkformer
+
+# Install in development mode
+pip install -e .
+```
+
+### Pretrained Models
 | Language | Model |
 |----------|-------|
 | Vietnamese  | [khanhld/chunkformer-large-vie](https://huggingface.co/khanhld/chunkformer-large-vie) |
 | English   | [khanhld/chunkformer-large-en-libri-960h](https://huggingface.co/khanhld/chunkformer-large-en-libri-960h) |
 
-
-#### Dependencies
-To run the implementation, ensure you have an environment with PyTorch working and the following dependencies installed:
-
-```bash
-pip install -r requirements.txt
-```
-
 <a name = "usage" ></a>
 ## Usage
-#### Training the Model
-For training/finetuning, follow this [PR](https://github.com/wenet-e2e/wenet/pull/2723).
+
+### Python API Usage
+```python
+from chunkformer import ChunkFormerModel
+
+# Load a pre-trained model from Hugging Face or local directory
+model = ChunkFormerModel.from_pretrained("khanhld/chunkformer-large-vie")
+
+# For single long-form audio transcription
+transcription = model.endless_decode(
+    audio_path="path/to/long_audio.wav",
+    chunk_size=64,
+    left_context_size=128,
+    right_context_size=128,
+    total_batch_duration=14400,  # in seconds
+    return_timestamps=True
+)
+print(transcription)
+
+# For batch processing of multiple audio files
+audio_files = ["audio1.wav", "audio2.wav", "audio3.wav"]
+transcriptions = model.batch_decode(
+    audio_paths=audio_files,
+    chunk_size=64,
+    left_context_size=128,
+    right_context_size=128,
+    total_batch_duration=1800  # Total batch duration in seconds
+)
+
+for i, transcription in enumerate(transcriptions):
+    print(f"Audio {i+1}: {transcription}")
+
+```
+
+### Command Line Usage
+After installation, you can use the command line interface:
 
 #### Long-Form Audio Testing
 To test the model with a single [long-form audio file](data/common_voice_vi_23397238.wav). Audio file extensions ".mp3", ".wav", ".flac", ".m4a", ".aac" are accepted:
 ```bash
-python decode.py \
-    --model_checkpoint path/to/local/hf/checkpoint/repo \
+chunkformer-decode \
+    --model_checkpoint path/to/hf/checkpoint/repo \
     --long_form_audio path/to/audio.wav \
-    --total_batch_duration 14400 \ #in second, default is 1800
+    --total_batch_duration 14400 \
     --chunk_size 64 \
     --left_context_size 128 \
     --right_context_size 128
@@ -76,10 +124,10 @@ Example Output:
 The [audio_list.tsv](data/audio_list.tsv) file must have at least one column named **wav**. Optionally, a column named **txt** can be included to compute the **Word Error Rate (WER)**. Output will be saved to the same file.
 
 ```bash
-python decode.py \
-    --model_checkpoint path/to/local/hf/checkpoint/repo \
+chunkformer-decode \
+    --model_checkpoint path/to/hf/checkpoint/repo \
     --audio_list path/to/audio_list.tsv \
-    --total_batch_duration 14400 \ #in second, default is 1800
+    --total_batch_duration 14400 \
     --chunk_size 64 \
     --left_context_size 128 \
     --right_context_size 128
@@ -91,6 +139,62 @@ WER: 0.1234
 
 ---
 
+<a name = "training" ></a>
+## Training
+For training/finetuning ChunkFormer models, follow the implementation in this [WeNet PR](https://github.com/wenet-e2e/wenet/pull/2723).
+
+### Setting Up Your Model for Inference
+After training is complete, you need to prepare your model for use with this library. Follow these steps:
+
+#### Step 1: Create Model Directory
+```bash
+mkdir my_chunkformer_model
+cd my_chunkformer_model
+```
+
+#### Step 2: Copy Required Files
+Copy the following files from your training output to the model directory:
+
+1. **Model Checkpoint**
+   ```bash
+   # Supported formats: .pt, .ckpt, .bin.
+   # Wenet uses .pt by default
+   cp /path/to/your/final.pt pytorch_model.pt
+   ```
+
+2. **Training Configuration**
+   ```bash
+   cp /path/to/your/train.yaml config.yaml
+   ```
+
+3. **CMVN Statistics**
+   ```bash
+   cp /path/to/your/global_cmvn global_cmvn
+   ```
+
+4. **Vocabulary File (_units.txt)**:
+   ```bash
+   cp /path/to/your/_units.txt vocab.txt
+   ```
+
+#### Step 3: Verify Model Structure
+Your model directory should look like this:
+```
+my_chunkformer_model/
+├── pytorch_model.pt (or .ckpt/.bin)
+├── config.yaml
+├── global_cmvn
+└── vocab.txt
+```
+
+#### Step 4: Test Your Local Model Directory
+```python
+import chunkformer
+model = chunkformer.ChunkFormerModel.from_pretrained("./my_chunkformer_model")
+result = model.endless_decode("test_audio.wav")
+print(result)
+```
+
 <a name = "citation" ></a>
 ## Citation
 If you use this work in your research, please cite:
@@ -98,8 +202,8 @@ If you use this work in your research, please cite:
 ```bibtex
 @INPROCEEDINGS{10888640,
   author={Le, Khanh and Ho, Tuan Vu and Tran, Dung and Chau, Duc Thanh},
-  booktitle={ICASSP 2025 - 2025 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)}, 
-  title={ChunkFormer: Masked Chunking Conformer For Long-Form Speech Transcription}, 
+  booktitle={ICASSP 2025 - 2025 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
+  title={ChunkFormer: Masked Chunking Conformer For Long-Form Speech Transcription},
   year={2025},
   volume={},
   number={},
