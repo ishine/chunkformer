@@ -244,6 +244,28 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
     echo "Warning: Vocabulary file not found at $dict"
   fi
 
+  # Step 5: Copy tokenizer files (dict, bpemodel, vocab) to tokenizer folder
+  tokenizer_dir=$inference_model_dir/tokenizer
+  mkdir -p $tokenizer_dir
+  if [ -f "$dict" ]; then
+    cp $dict $tokenizer_dir/
+    echo "Copied $dict to $tokenizer_dir/"
+  else
+    echo "Warning: $dict not found for tokenizer folder."
+  fi
+  if [ -f "${bpemodel}.model" ]; then
+    cp ${bpemodel}.model $tokenizer_dir/
+    echo "Copied ${bpemodel}.model to $tokenizer_dir/"
+  else
+    echo "Warning: ${bpemodel}.model not found for tokenizer folder."
+  fi
+  if [ -f "$vocab" ]; then
+    cp $vocab $tokenizer_dir/
+    echo "Copied $vocab to $tokenizer_dir/"
+  else
+    echo "Warning: $vocab not found for tokenizer folder."
+  fi
+
   echo "Model setup completed. Directory structure:"
   ls -la $inference_model_dir
   echo ""

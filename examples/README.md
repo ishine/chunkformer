@@ -207,6 +207,7 @@ $dir
 ├── avg_5.pt                          # Averaged checkpoint
 ├── train.yaml                        # Training config
 └── model_checkpoint_avg_5/           # Ready for inference
+    ├── tokenizer                     # Tokenizer folder
     ├── pytorch_model.pt              # Model weights
     ├── config.yaml                   # Model config
     ├── global_cmvn                   # Normalization stats
