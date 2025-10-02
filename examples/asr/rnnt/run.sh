@@ -41,7 +41,7 @@ average_checkpoint=true
 decode_checkpoint=$dir/final.pt
 # maybe you can try to adjust it if you can not get close results as README.md
 average_num=75
-decode_modes="ctc_greedy_search"
+decode_modes="rnnt_greedy_search"
 
 # bpemode (unigram or bpe)
 nbpe=1024
