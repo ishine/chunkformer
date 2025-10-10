@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 import torch
 from torch import nn
 
-from chunkformer.utils.class_utils import WENET_ACTIVATION_CLASSES, WENET_RNN_CLASSES
+from chunkformer.utils.class_utils import CHUNKFORMER_ACTIVATION_CLASSES, CHUNKFORMER_RNN_CLASSES
 
 
 def ApplyPadding(input, padding, pad_value) -> torch.Tensor:
@@ -54,15 +54,13 @@ class PredictorBase(torch.nn.Module):
         raise NotImplementedError("this is a base precictor")
 
     def forward_step(
-        self, input: torch.Tensor, padding: torch.Tensor, cache: List[torch.Tensor]
+        self, input: torch.Tensor, cache: List[torch.Tensor]
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         (
             _,
             _,
-            _,
         ) = (
             input,
-            padding,
             cache,
         )
         raise NotImplementedError("this is a base precictor")
@@ -92,7 +90,7 @@ class RNNPredictor(PredictorBase):
         # NOTE(Mddct): rnn base from torch not support layer norm
         # will add layer norm and prune value in cell and layer
         # ref: https://github.com/Mddct/neural-lm/blob/main/models/gru_cell.py
-        self.rnn = WENET_RNN_CLASSES[rnn_type](
+        self.rnn = CHUNKFORMER_RNN_CLASSES[rnn_type](
             input_size=embed_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
@@ -190,12 +188,11 @@ class RNNPredictor(PredictorBase):
         ]
 
     def forward_step(
-        self, input: torch.Tensor, padding: torch.Tensor, cache: List[torch.Tensor]
+        self, input: torch.Tensor, cache: List[torch.Tensor]
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         Args:
             input (torch.Tensor): [batch_size, time_step=1]
-            padding (torch.Tensor): [batch_size,1], 1 is padding value
             cache : rnn predictor cache[0] == state_m
                     cache[1] == state_c
         """
@@ -206,8 +203,6 @@ class RNNPredictor(PredictorBase):
         out, (m, c) = self.rnn(embed, (state_m, state_c))
 
         out = self.projection(out)
-        m = ApplyPadding(m, padding.unsqueeze(0), state_m)
-        c = ApplyPadding(c, padding.unsqueeze(0), state_c)
 
         return (out, [m, c])
 
@@ -245,7 +240,7 @@ class EmbeddingPredictor(PredictorBase):
         self.embed_dropout = nn.Dropout(p=embed_dropout)
         self.ffn = nn.Linear(self.embed_size, self.embed_size)
         self.norm = nn.LayerNorm(self.embed_size, eps=layer_norm_epsilon)
-        self.activatoin = WENET_ACTIVATION_CLASSES[activation]()
+        self.activatoin = CHUNKFORMER_ACTIVATION_CLASSES[activation]()
 
     def output_size(self):
         return self.embed_size
@@ -327,13 +322,11 @@ class EmbeddingPredictor(PredictorBase):
     def forward_step(
         self,
         input: torch.Tensor,
-        padding: torch.Tensor,
         cache: List[torch.Tensor],
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """forward step for inference
         Args:
             input (torch.Tensor): [batch_size, time_step=1]
-            padding (torch.Tensor): [batch_size,1], 1 is padding value
             cache: for embedding predictor, cache[0] == history
         """
         assert input.size(1) == 1
@@ -399,7 +392,7 @@ class ConvPredictor(PredictorBase):
             bias=bias,
         )
         self.norm = nn.LayerNorm(embed_size, eps=layer_norm_epsilon)
-        self.activatoin = WENET_ACTIVATION_CLASSES[activation]()
+        self.activatoin = CHUNKFORMER_ACTIVATION_CLASSES[activation]()
 
     def output_size(self):
         return self.embed_size
@@ -455,12 +448,11 @@ class ConvPredictor(PredictorBase):
         return out
 
     def forward_step(
-        self, input: torch.Tensor, padding: torch.Tensor, cache: List[torch.Tensor]
+        self, input: torch.Tensor, cache: List[torch.Tensor]
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """forward step for inference
         Args:
             input (torch.Tensor): [batch_size, time_step=1]
-            padding (torch.Tensor): [batch_size,1], 1 is padding value
             cache: for embedding predictor, cache[0] == history
         """
         assert input.size(1) == 1
