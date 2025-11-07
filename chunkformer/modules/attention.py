@@ -244,7 +244,7 @@ class ChunkAttentionWithRelativeRightContext(MultiHeadedAttention):
         left and right context.
 
         Args:
-            x: Input tensor (batch, head, time1, 2*time1-1+left_context_size).
+            x: Input tensor (batch, head, time1, 2*time1-1+left_context_size+right_context_size).
                 time1 means the length of query vector.
             left_context_size (int): Left context size for limited chunk context
             right_context_size (int): Right context size for limited chunk context
@@ -300,10 +300,12 @@ class ChunkAttentionWithRelativeRightContext(MultiHeadedAttention):
         """
         bz = query.shape[0]
         n_feat = query.shape[2]
+        q_size = query.size(1)
+
         q, k, v = self.forward_qkv(query, key, value)
         q = q.transpose(1, 2)  # (batch, time1, head, d_k)
 
-        limited_context_attn = chunk_size > 0 and left_context_size > 0 and right_context_size > 0
+        limited_context_attn = chunk_size > 0
 
         # NOTE(xcsong):
         #   when export onnx model, for 1st chunk, we feed
@@ -332,7 +334,6 @@ class ChunkAttentionWithRelativeRightContext(MultiHeadedAttention):
         elif limited_context_attn:
             # chunking query
             # [B, time1, head, d_k]
-            q_size = q.size(1)
             n_frames_pad = chunk_size - ((q_size - chunk_size) % chunk_size)
             n_frames_pad = n_frames_pad % chunk_size
             q = torch.nn.functional.pad(q, (0, 0, 0, 0, 0, n_frames_pad))

@@ -66,6 +66,7 @@ class ChunkFormerEncoder(torch.nn.Module):
         dynamic_chunk_sizes: Optional[List] = None,
         dynamic_left_context_sizes: Optional[List] = None,
         dynamic_right_context_sizes: Optional[List] = None,
+        streaming: bool = False,
         **kwargs,
     ):
         """Construct ChunkFormerEncoder
@@ -96,6 +97,7 @@ class ChunkFormerEncoder(torch.nn.Module):
 
         self._output_size = output_size
         self.global_cmvn = global_cmvn
+        self.streaming = streaming
 
         self.normalize_before = normalize_before
         self.final_norm = final_norm
@@ -202,10 +204,14 @@ class ChunkFormerEncoder(torch.nn.Module):
         ):
             chunk_size = random.choice(self.dynamic_chunk_sizes)
             left_context_size = random.choice(self.dynamic_left_context_sizes)
-            right_context_size = random.choice(self.dynamic_right_context_sizes)
-            full_context_training = not (
-                chunk_size > 0 and left_context_size > 0 and right_context_size > 0
-            )
+            if not self.streaming:
+                right_context_size = random.choice(self.dynamic_right_context_sizes)
+            else:
+                # only choose right context size < chunk_size
+                right_context_size = random.choice(
+                    [r for r in self.dynamic_right_context_sizes if r < chunk_size]
+                )
+            full_context_training = not (chunk_size > 0)
 
         if full_context_training:
             chunk_size, left_context_size, right_context_size = 0, 0, 0
@@ -251,7 +257,7 @@ class ChunkFormerEncoder(torch.nn.Module):
         )
         mask_pad = masks  # (B, 1, T/subsample_rate)
 
-        xs = self.forward_layers(
+        xs, _, _ = self.forward_layers(
             xs,
             masks,
             pos_emb,
@@ -270,31 +276,195 @@ class ChunkFormerEncoder(torch.nn.Module):
     def forward_layers(
         self,
         xs: torch.Tensor,
-        chunk_masks: torch.Tensor,
+        masks: torch.Tensor,
         pos_emb: torch.Tensor,
         mask_pad: torch.Tensor,
+        att_cache: torch.Tensor = torch.zeros((0, 0, 0, 0, 0)),
+        cnn_cache: torch.Tensor = torch.zeros((0, 0, 0, 0)),
         chunk_size: int = 0,
         left_context_size: int = 0,
         right_context_size: int = 0,
     ) -> torch.Tensor:
+        r_att_cache = []  # type: List[torch.Tensor]
+        r_cnn_cache = []  # type: List[torch.Tensor]
+
         for idx, layer in enumerate(self.encoders):
-            xs, chunk_masks, _, _ = layer(
+            xs, _, new_att_cache, new_cnn_cache = layer(
                 xs,
-                chunk_masks,
+                masks,
                 pos_emb,
                 mask_pad,
+                att_cache=att_cache[idx] if att_cache.size(0) > 0 else att_cache,
+                cnn_cache=cnn_cache[idx] if cnn_cache.size(0) > 0 else cnn_cache,
                 chunk_size=chunk_size,
                 left_context_size=left_context_size,
                 right_context_size=right_context_size,
             )
-        return xs
+            r_att_cache.append(new_att_cache)
+            r_cnn_cache.append(new_cnn_cache)
+
+        r_att_cache = torch.stack(r_att_cache, dim=0)  # type: ignore
+        r_cnn_cache = torch.stack(r_cnn_cache, dim=0)  #
+        return xs, r_att_cache, r_cnn_cache
+
+    def forward_chunk(
+        self,
+        xs: torch.Tensor,
+        att_cache: torch.Tensor = torch.zeros((0, 0, 0, 0, 0)),
+        cnn_cache: torch.Tensor = torch.zeros((0, 0, 0, 0)),
+        chunk_size: int = 0,
+        left_context_size: int = 0,
+        right_context_size: int = 0,
+        offset: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Embed positions in tensor.
+
+        Args:
+            xs: padded input tensor (B, T, D)
+            xs_lens: input length (B)
+            att_cache (torch.Tensor): Cache tensor of the KEY & VALUE
+                (n_layers, batch, head, cache_t1, d_k * 2), head * d_k == size.
+            cnn_cache (torch.Tensor): Convolution cache in ChunkFormer layer
+                (n_layers, batch, size, cache_t2)
+            chunk_size (int): Chunk size for limited chunk context
+            left_context_size (int): Left context size for limited chunk context
+            right_context_size (int): Right context size for limited chunk context
+        Returns:
+            encoder output tensor xs, and subsampled masks
+            xs: padded output tensor (B, T' ~= T/subsample_rate, D)
+            masks: torch.Tensor batch padding mask after subsample
+                (B, 1, T' ~= T/subsample_rate)
+        """
+        bz = xs.size(0)
+        T = xs.size(1)
+        if self.global_cmvn is not None:
+            xs = self.global_cmvn(xs)
+
+        xs, pos_emb, _ = self.embed(
+            xs,
+            torch.ones((bz, 1, T), dtype=torch.bool, device=xs.device),
+            chunk_size=chunk_size + right_context_size,
+            left_context_size=left_context_size,
+            right_context_size=0,
+        )
+
+        att_masks = (
+            torch.arange(0, left_context_size + chunk_size + right_context_size, device=xs.device)
+            .unsqueeze(0)
+            .repeat(xs.size(0), 1)
+        )  # [B, L + C + R]
+        att_masks = att_masks < chunk_size + right_context_size + offset
+        att_masks = att_masks.flip(-1).unsqueeze(1)
+
+        xs, r_att_cache, r_cnn_cache = self.forward_layers(
+            xs,
+            att_masks,
+            pos_emb,
+            torch.ones((bz, 1, xs.size(1)), dtype=torch.bool, device=xs.device),
+            att_cache=att_cache,
+            cnn_cache=cnn_cache,
+            chunk_size=chunk_size,
+            left_context_size=left_context_size,
+            right_context_size=0,
+        )
+
+        if self.normalize_before and self.final_norm:
+            xs = self.after_norm(xs)
+
+        r_att_cache = r_att_cache[
+            :,
+            :,
+            :,
+            -left_context_size - right_context_size : r_att_cache.shape[-2] - right_context_size,
+        ]
+        r_cnn_cache = r_cnn_cache[
+            ...,
+            -cnn_cache.size(3) - right_context_size : r_cnn_cache.shape[-1] - right_context_size,
+        ]
+
+        return xs, _, r_att_cache, r_cnn_cache
+
+    def forward_chunk_by_chunk(
+        self,
+        xs: torch.Tensor,
+        xs_lens: torch.Tensor,
+        chunk_size: int = 0,
+        left_context_size: int = 0,
+        right_context_size: int = 0,
+    ):
+        """
+        Perform streaming/endless decoding on long-form audio.
+
+        Args:
+            audio_path: Path to audio file
+            chunk_size: Chunk size for processing
+            left_context_size: Left context size
+            right_context_size: Right context size
+            total_batch_duration: Total duration in seconds for batch processing
+            return_timestamps: Whether to return timestamps
+        """
+        batch_size = xs.size(0)
+        conv_lorder = self.cnn_module_kernel // 2
+
+        chunk_size_pre_sub = self.embed.reverse_calc_length(chunk_size)
+        right_context_size_pre_sub = right_context_size * self.embed.subsampling_rate
+        offset = 0
+
+        size = chunk_size_pre_sub + right_context_size_pre_sub
+        stride = chunk_size * self.embed.subsampling_rate
+
+        # pad to ensure the subsampling
+        pad_length = stride - ((xs.size(1) - size) % stride)
+        xs = torch.nn.functional.pad(xs, (0, 0, 0, pad_length))
+        xs_lens = xs_lens + pad_length
+
+        # # initial attention and convolution caches
+        att_cache = torch.zeros(
+            (
+                self.num_blocks,
+                batch_size,
+                self.attention_heads,
+                left_context_size,
+                self._output_size // self.attention_heads * 2,
+            ),
+            dtype=xs.dtype,
+            device=xs.device,
+        )
+        cnn_cache = torch.zeros(
+            (self.num_blocks, batch_size, self._output_size, conv_lorder),
+            dtype=xs.dtype,
+            device=xs.device,
+        )
+
+        out_xs = []
+        for i in range(0, xs.size(1) - size + stride, stride):
+            chunk_xs = xs[:, i : i + size, :]
+
+            chunk_out, _, att_cache, cnn_cache = self.forward_chunk(
+                chunk_xs,
+                att_cache,
+                cnn_cache,
+                chunk_size=chunk_size,
+                left_context_size=left_context_size,
+                right_context_size=right_context_size,
+                offset=offset,
+            )
+
+            chunk_out = chunk_out[:, :chunk_size, :] if i + size < xs.size(1) else chunk_out
+            out_xs.append(chunk_out)
+            offset += chunk_size
+
+        out_xs = torch.cat(out_xs, dim=1)  # [B, T, D]
+        out_masks = ~make_pad_mask(self.embed.calc_length(xs_lens)).unsqueeze(1)  # (B, 1, T)
+        return out_xs, out_masks
 
     def forward(
         self,
         xs: torch.Tensor,
         xs_lens: torch.Tensor,
-        decoding_chunk_size: int = 0,
-        num_decoding_left_chunks: int = -1,
+        chunk_size: int = 0,
+        left_context_size: int = -1,
+        right_context_size: int = -1,
         **kwargs,
     ):
         """
@@ -317,16 +487,16 @@ class ChunkFormerEncoder(torch.nn.Module):
         else:
             # If either decoding_chunk_size or num_decoding_left_chunks
             # is less than 0, use the full context decoding.
-            if decoding_chunk_size < 0 or num_decoding_left_chunks < 0:
-                decoding_chunk_size = 0
-                num_decoding_left_chunks = 0
+            if chunk_size < 0 or left_context_size < 0 or right_context_size < 0:
+                chunk_size = 0
+                left_context_size = 0
+                right_context_size = 0
             return self.forward_encoder(
                 xs=xs,
                 xs_lens=xs_lens,
-                chunk_size=decoding_chunk_size,
-                left_context_size=num_decoding_left_chunks,
-                # we assume left and right context are the same
-                right_context_size=num_decoding_left_chunks,
+                chunk_size=chunk_size,
+                left_context_size=left_context_size,
+                right_context_size=right_context_size,
                 **kwargs,
             )
 

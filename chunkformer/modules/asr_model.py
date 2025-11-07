@@ -207,24 +207,28 @@ class ASRModel(torch.nn.Module):
         self,
         speech: torch.Tensor,
         speech_lengths: torch.Tensor,
-        decoding_chunk_size: int = -1,
-        num_decoding_left_chunks: int = -1,
+        chunk_size: int = -1,
+        left_context_size: int = -1,
+        right_context_size: int = -1,
         simulate_streaming: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Let's assume B = batch_size
         # 1. Encoder
-        if simulate_streaming and decoding_chunk_size > 0:
+        if simulate_streaming and chunk_size > 0:
             encoder_out, encoder_mask = self.encoder.forward_chunk_by_chunk(
                 speech,
-                decoding_chunk_size=decoding_chunk_size,
-                num_decoding_left_chunks=num_decoding_left_chunks,
+                speech_lengths,
+                chunk_size=chunk_size,
+                left_context_size=left_context_size,
+                right_context_size=right_context_size,
             )  # (B, maxlen, encoder_dim)
         else:
             encoder_out, encoder_mask = self.encoder(
                 speech,
                 speech_lengths,
-                decoding_chunk_size=decoding_chunk_size,
-                num_decoding_left_chunks=num_decoding_left_chunks,
+                chunk_size=chunk_size,
+                left_context_size=left_context_size,
+                right_context_size=right_context_size,
             )
         return encoder_out, encoder_mask
 
@@ -259,8 +263,9 @@ class ASRModel(torch.nn.Module):
         speech: torch.Tensor,
         speech_lengths: torch.Tensor,
         beam_size: int,
-        decoding_chunk_size: int = -1,
-        num_decoding_left_chunks: int = -1,
+        chunk_size: int = -1,
+        left_context_size: int = -1,
+        right_context_size: int = -1,
         ctc_weight: float = 0.0,
         simulate_streaming: bool = False,
         reverse_weight: float = 0.0,
@@ -296,12 +301,13 @@ class ASRModel(torch.nn.Module):
         Returns: dict results of all decoding methods
         """
         assert len(speech) == len(speech_lengths)
-        assert decoding_chunk_size != 0
+        assert chunk_size != 0
         encoder_out, encoder_mask = self._forward_encoder(
             speech,
             speech_lengths,
-            decoding_chunk_size,
-            num_decoding_left_chunks,
+            chunk_size,
+            left_context_size,
+            right_context_size,
             simulate_streaming,
         )
         encoder_lens = encoder_mask.squeeze(1).sum(1)
@@ -364,51 +370,6 @@ class ASRModel(torch.nn.Module):
     def eos_symbol(self) -> int:
         """Export interface for c++ call, return eos symbol id of the model"""
         return self.eos
-
-    @torch.jit.export
-    def forward_encoder_chunk(
-        self,
-        xs: torch.Tensor,
-        offset: int,
-        required_cache_size: int,
-        att_cache: torch.Tensor = torch.zeros(0, 0, 0, 0),
-        cnn_cache: torch.Tensor = torch.zeros(0, 0, 0, 0),
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """ Export interface for c++ call, give input chunk xs, and return
-            output from time 0 to current chunk.
-
-        Args:
-            xs (torch.Tensor): chunk input, with shape (b=1, time, mel-dim),
-                where `time == (chunk_size - 1) * subsample_rate + \
-                        subsample.right_context + 1`
-            offset (int): current offset in encoder output time stamp
-            required_cache_size (int): cache size required for next chunk
-                compuation
-                >=0: actual cache size
-                <0: means all history cache is required
-            att_cache (torch.Tensor): cache tensor for KEY & VALUE in
-                transformer/conformer attention, with shape
-                (elayers, head, cache_t1, d_k * 2), where
-                `head * d_k == hidden-dim` and
-                `cache_t1 == chunk_size * num_decoding_left_chunks`.
-            cnn_cache (torch.Tensor): cache tensor for cnn_module in conformer,
-                (elayers, b=1, hidden-dim, cache_t2), where
-                `cache_t2 == cnn.lorder - 1`
-
-        Returns:
-            torch.Tensor: output of current input xs,
-                with shape (b=1, chunk_size, hidden-dim).
-            torch.Tensor: new attention cache required for next chunk, with
-                dynamic shape (elayers, head, ?, d_k * 2)
-                depending on required_cache_size.
-            torch.Tensor: new conformer cnn cache required for next chunk, with
-                same shape as the original cnn_cache.
-
-        """
-        result: Tuple[torch.Tensor, torch.Tensor, torch.Tensor] = self.encoder.forward_chunk(
-            xs, offset, required_cache_size, att_cache, cnn_cache
-        )
-        return result
 
     @torch.jit.export
     def ctc_activation(self, xs: torch.Tensor) -> torch.Tensor:
