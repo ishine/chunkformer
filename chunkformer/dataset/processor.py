@@ -26,7 +26,6 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 import torchaudio.compliance.kaldi as kaldi
-from langid.langid import LanguageIdentifier, model
 from torch.nn.utils.rnn import pad_sequence
 
 from chunkformer.text.base_tokenizer import BaseTokenizer
@@ -35,7 +34,6 @@ torchaudio.utils.sox_utils.set_buffer_size(16500)
 
 AUDIO_FORMAT_SETS = set(["flac", "mp3", "m4a", "ogg", "opus", "wav", "wma"])
 
-lid = LanguageIdentifier.from_modelstring(model, norm_probs=True)
 
 logging.getLogger("langid").setLevel(logging.INFO)
 
@@ -100,28 +98,6 @@ def parse_speaker(sample, speaker_dict):
     assert "speaker" in sample
     speaker = sample["speaker"]
     sample["speaker"] = speaker_dict.get(speaker, 0)
-    return sample
-
-
-def detect_language(sample, limited_langs):
-    assert "txt" in sample
-    # NOTE(xcsong): Because language classification may not be very accurate
-    #   (for example, Chinese being classified as Japanese), our workaround,
-    #   given we know for certain that the training data only consists of
-    #   Chinese and English, is to limit the classification results to reduce
-    #   the impact of misclassification.
-    lid.set_languages(limited_langs)
-    # i.e., ('zh', 0.9999999909903544)
-    sample["lang"] = lid.classify(sample["txt"])[0]
-    return sample
-
-
-def detect_task(sample):
-    # TODO(xcsong): Currently, the task is hard-coded to 'transcribe'.
-    #   In the future, we could dynamically determine the task based on
-    #   the contents of sample. For instance, if a sample contains both
-    #   'txt_en' and 'txt_zh', the task should be set to 'translate'.
-    sample["task"] = "transcribe"
     return sample
 
 
@@ -533,43 +509,69 @@ def spec_trim(sample, max_t=20):
 def padding(data, pad_feat=True):
     """Padding the data into training data
 
+    Automatically detects and supports both ASR and classification tasks.
+    - ASR data: has "label" key (token IDs)
+    - Classification data: has "{task}_label" keys (e.g., "gender_label", "emotion_label")
+
     Args:
-        data: List[{key, feat, label}
+        data: List[{key, feat, label, ...}] for ASR or
+              List[{key, feat, {task}_label, ...}] for classification
+        pad_feat: Whether to pad features
 
     Returns:
-        Tuple(keys, feats, labels, feats lengths, label lengths)
+        Batched dictionary for ASR or classification
     """
     sample = data
     assert isinstance(sample, list)
+    assert len(sample) > 0, "Empty batch"
+
     feats_length = torch.tensor([x["feat"].size(0) for x in sample], dtype=torch.int32)
     order = torch.argsort(feats_length, descending=True)
     feats_lengths = torch.tensor([sample[i]["feat"].size(0) for i in order], dtype=torch.int32)
     sorted_feats = [sample[i]["feat"] for i in order]
     sorted_keys = [sample[i]["key"] for i in order]
-    sorted_labels = [torch.tensor(sample[i]["label"], dtype=torch.int64) for i in order]
-    sorted_wavs = [sample[i]["wav"].squeeze(0) for i in order]
-    langs = [sample[i]["lang"] for i in order]
-    tasks = [sample[i]["task"] for i in order]
-    label_lengths = torch.tensor([x.size(0) for x in sorted_labels], dtype=torch.int32)
-    wav_lengths = torch.tensor([x.size(0) for x in sorted_wavs], dtype=torch.int32)
     padded_feats = pad_sequence(sorted_feats, batch_first=True, padding_value=0)
-    padding_labels = pad_sequence(sorted_labels, batch_first=True, padding_value=-1)
-    padded_wavs = pad_sequence(sorted_wavs, batch_first=True, padding_value=0)
 
-    batch = {
-        "keys": sorted_keys,
-        "feats": padded_feats if pad_feat else sorted_feats,
-        "target": padding_labels,
-        "feats_lengths": feats_lengths,
-        "target_lengths": label_lengths,
-        "pcm": padded_wavs,
-        "pcm_length": wav_lengths,
-        "langs": langs,
-        "tasks": tasks,
-    }
-    if "speaker" in sample[0]:
-        speaker = torch.tensor([sample[i]["speaker"] for i in order], dtype=torch.int32)
-        batch["speaker"] = speaker
+    # Detect data type: ASR has "label" key, classification has "*_label" keys
+    is_asr = "label" in sample[0]
+
+    if is_asr:
+        # ASR-specific batching
+        sorted_labels = [torch.tensor(sample[i]["label"], dtype=torch.int64) for i in order]
+        sorted_wavs = [sample[i]["wav"].squeeze(0) for i in order]
+        label_lengths = torch.tensor([x.size(0) for x in sorted_labels], dtype=torch.int32)
+        wav_lengths = torch.tensor([x.size(0) for x in sorted_wavs], dtype=torch.int32)
+        padding_labels = pad_sequence(sorted_labels, batch_first=True, padding_value=-1)
+        padded_wavs = pad_sequence(sorted_wavs, batch_first=True, padding_value=0)
+
+        batch = {
+            "keys": sorted_keys,
+            "feats": padded_feats if pad_feat else sorted_feats,
+            "target": padding_labels,
+            "feats_lengths": feats_lengths,
+            "target_lengths": label_lengths,
+            "pcm": padded_wavs,
+            "pcm_length": wav_lengths,
+        }
+        if "speaker" in sample[0]:
+            speaker = torch.tensor([sample[i]["speaker"] for i in order], dtype=torch.int32)
+            batch["speaker"] = speaker
+    else:
+        # Classification-specific batching
+        # Automatically detect all *_label keys
+        batch = {
+            "keys": sorted_keys,
+            "feats": padded_feats if pad_feat else sorted_feats,
+            "feats_lengths": feats_lengths,
+        }
+
+        # Find all classification label keys (e.g., gender_label, emotion_label, etc.)
+        label_keys = [k for k in sample[0].keys() if k.endswith("_label")]
+
+        # Add each classification task's labels to the batch
+        for label_key in label_keys:
+            labels = torch.tensor([sample[i][label_key] for i in order], dtype=torch.int64)
+            batch[label_key] = labels
     return batch
 
 
@@ -590,3 +592,28 @@ class DynamicBatchWindow:
             self.longest_frames = new_sample_frames
             return True
         return False
+
+
+def parse_classification_labels(sample: dict, tasks: list) -> dict:
+    """Parse classification labels from sample.
+
+    Args:
+        sample: Dictionary containing label information
+        tasks: List of task names to parse (e.g., ['gender', 'emotion', 'region'])
+
+    Returns:
+        Updated sample with parsed labels
+
+    Example:
+        Input sample: {'key': 'utt1', 'gender_label': '0', 'emotion_label': '3'}
+        tasks: ['gender', 'emotion']
+        Output: {'key': 'utt1', 'gender_label': 0, 'emotion_label': 3}
+    """
+    for task in tasks:
+        label_key = f"{task}_label"
+        if label_key in sample:
+            sample[label_key] = int(sample[label_key])
+        else:
+            # raise error
+            raise KeyError(f"Label {label_key} not found in sample {sample}")
+    return sample
